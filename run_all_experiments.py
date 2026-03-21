@@ -33,58 +33,6 @@ from DistShap import DistShap
 from shap_utils import portion_performance, return_model
 
 # =============================================================================
-# DEBUG: data split validation
-# =============================================================================
-_LOG_PATH = "/Users/apple/Documents/大三/D-SVARM-main/.cursor/debug-dfd697.log"
-
-def _dbg(hypothesis_id, run_id, location, message, data):
-    """Write one NDJSON log entry."""
-    import json, time as _t
-    entry = {
-        "sessionId": "dfd697",
-        "id": f"log_{int(_t.time()*1000)}",
-        "timestamp": int(_t.time() * 1000),
-        "location": location,
-        "message": message,
-        "data": data,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id
-    }
-    try:
-        with open(_LOG_PATH, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
-
-
-def _validate_split(name, pool_end, train_size, num_test, heldout_size, n_total):
-    """Log pool/test/heldout overlap checks."""
-    # pool indices: [train_size, pool_end)
-    pool_start = train_size
-    # test indices: [n_total - heldout_size - num_test, n_total - heldout_size)
-    test_start = n_total - heldout_size - num_test
-    # heldout indices: [n_total - heldout_size, n_total)
-    heldout_start = n_total - heldout_size
-
-    pool_overlap_test = len(set(range(pool_start, pool_end)) &
-                            set(range(test_start, test_start + num_test)))
-    pool_overlap_heldout = len(set(range(pool_start, pool_end)) &
-                                set(range(heldout_start, n_total)))
-    test_overlap_heldout = len(set(range(test_start, test_start + num_test)) &
-                                set(range(heldout_start, n_total)))
-
-    _dbg("A", "debug", f"{name}:split_validation",
-          f"pool[{pool_start},{pool_end}) test[{test_start},{test_start+num_test}) heldout[{heldout_start},{n_total})",
-          {"pool_overlap_test": pool_overlap_test,
-           "pool_overlap_heldout": pool_overlap_heldout,
-           "test_overlap_heldout": test_overlap_heldout,
-           "pool_size": pool_end - pool_start,
-           "n_total": n_total})
-
-    return pool_overlap_test == 0 and pool_overlap_heldout == 0 and test_overlap_heldout == 0
-
-
-# =============================================================================
 # Dataset Loaders
 # =============================================================================
 
@@ -115,15 +63,10 @@ def load_covtype(train_size=200, num_test=1000, random_state=42):
     y_train = y_bin[:train_size]
     X_pool = data[train_size:pool_end_idx]
     y_pool = y_bin[train_size:pool_end_idx]
-    X_test_full = data[-(num_test + heldout_size):-heldout_size]
-    y_test_full = y_bin[-(num_test + heldout_size):-heldout_size]
-
-    X_test = X_test_full[:num_test]
-    y_test = y_test_full[:num_test]
-    X_heldout = X_test_full[num_test:]
-    y_heldout = y_test_full[num_test:]
-
-    _validate_split("CoverType", pool_end_idx, train_size, num_test, heldout_size, n_total)
+    X_test = data[-(num_test + heldout_size):-heldout_size]
+    y_test = y_bin[-(num_test + heldout_size):-heldout_size]
+    X_heldout = data[-heldout_size:]
+    y_heldout = y_bin[-heldout_size:]
 
     print(f"  CoverType: {len(X_train)} train, {len(X_pool)} pool, {len(X_test)} test, "
           f"{len(X_heldout)} heldout, classes={sorted(set(y_train))}")
@@ -169,23 +112,18 @@ def load_adult(train_size=200, num_test=1000, random_state=42):
     y_train = y[:train_end]
     X_pool = X[train_end:pool_end]
     y_pool = y[train_end:pool_end]
-    # test and heldout: strictly separate, from the tail
-    X_test_full = X[-(num_test + heldout_size):-heldout_size]
-    y_test_full = y[-(num_test + heldout_size):-heldout_size]
+    X_test = X[-(num_test + heldout_size):-heldout_size]
+    y_test = y[-(num_test + heldout_size):-heldout_size]
+    X_heldout = X[-heldout_size:]
+    y_heldout = y[-heldout_size:]
 
     # Normalize using pool statistics
     scaler = StandardScaler()
     scaler.fit(X_pool)
     X_train = scaler.transform(X_train)
     X_pool = scaler.transform(X_pool)
-    X_test_full = scaler.transform(X_test_full)
-
-    X_test = X_test_full[:num_test]
-    y_test = y_test_full[:num_test]
-    X_heldout = X_test_full[num_test:]
-    y_heldout = y_test_full[num_test:]
-
-    _validate_split("Adult", pool_end, train_size, num_test, heldout_size, n)
+    X_test = scaler.transform(X_test)
+    X_heldout = scaler.transform(X_heldout)
 
     print(f"  Adult: {len(X_train)} train, {len(X_pool)} pool, {len(X_test)} test, "
           f"{len(X_heldout)} heldout, classes={sorted(set(y_train))}")
@@ -225,15 +163,10 @@ def load_mnist(train_size=200, num_test=1000, random_state=42):
     y_train = y_bin[:train_end]
     X_pool = X_pca[train_end:pool_end]
     y_pool = y_bin[train_end:pool_end]
-    X_test_full = X_pca[-(num_test + heldout_size):-heldout_size]
-    y_test_full = y_bin[-(num_test + heldout_size):-heldout_size]
-
-    X_test = X_test_full[:num_test]
-    y_test = y_test_full[:num_test]
-    X_heldout = X_test_full[num_test:]
-    y_heldout = y_test_full[num_test:]
-
-    _validate_split("MNIST", pool_end, train_size, num_test, heldout_size, n)
+    X_test = X_pca[-(num_test + heldout_size):-heldout_size]
+    y_test = y_bin[-(num_test + heldout_size):-heldout_size]
+    X_heldout = X_pca[-heldout_size:]
+    y_heldout = y_bin[-heldout_size:]
 
     print(f"  MNIST: {len(X_train)} train, {len(X_pool)} pool, {len(X_test)} test, "
           f"{len(X_heldout)} heldout, classes={sorted(set(y_train))}")
@@ -260,22 +193,18 @@ def load_phoneme(train_size=200, num_test=1000, random_state=42):
     y_train = y[:train_end]
     X_pool = X[train_end:pool_end]
     y_pool = y[train_end:pool_end]
-    X_test_full = X[-(num_test + heldout_size):-heldout_size]
-    y_test_full = y[-(num_test + heldout_size):-heldout_size]
+    X_test = X[-(num_test + heldout_size):-heldout_size]
+    y_test = y[-(num_test + heldout_size):-heldout_size]
+    X_heldout = X[-heldout_size:]
+    y_heldout = y[-heldout_size:]
 
     # Normalize using pool statistics
     scaler = StandardScaler()
     scaler.fit(X_pool)
     X_train = scaler.transform(X_train)
     X_pool = scaler.transform(X_pool)
-    X_test_full = scaler.transform(X_test_full)
-
-    X_test = X_test_full[:num_test]
-    y_test = y_test_full[:num_test]
-    X_heldout = X_test_full[num_test:]
-    y_heldout = y_test_full[num_test:]
-
-    _validate_split("Phoneme", pool_end, train_size, num_test, heldout_size, n)
+    X_test = scaler.transform(X_test)
+    X_heldout = scaler.transform(X_heldout)
 
     print(f"  Phoneme: {len(X_train)} train, {len(X_pool)} pool, {len(X_test)} test, "
           f"{len(X_heldout)} heldout, classes={sorted(set(y_train))}")
@@ -362,20 +291,11 @@ def point_removal(X_train, y_train, X_test, y_test, vals, fracs, model_family='l
         if len(keep_idx) == 0:
             accs.append(np.nan)
             continue
-        # Instrument: log keep_idx class distribution
-        _dbg("E", "debug", "point_removal:fit",
-              f"frac={frac:.2f} n_remove={n_remove} keep={len(keep_idx)}",
-              {"frac": float(frac), "n_remove": int(n_remove),
-               "keep": int(len(keep_idx)),
-               "unique_classes": int(len(set(y_train[keep_idx])))})
         try:
             model = return_model(model_family)
             model.fit(X_train[keep_idx], y_train[keep_idx])
             accs.append(model.score(X_test, y_test))
-        except Exception as ex:
-            _dbg("E", "debug", "point_removal:exception",
-                  f"Single-class or fit error: {ex}",
-                  {"frac": float(frac), "error": str(ex)})
+        except Exception:
             accs.append(np.nan)
     return np.array(accs)
 
@@ -391,19 +311,11 @@ def point_removal_low(X_train, y_train, X_test, y_test, vals, fracs, model_famil
         if len(keep_idx) == 0:
             accs.append(np.nan)
             continue
-        _dbg("E", "debug", "point_removal_low:fit",
-              f"frac={frac:.2f} n_remove={n_remove} keep={len(keep_idx)}",
-              {"frac": float(frac), "n_remove": int(n_remove),
-               "keep": int(len(keep_idx)),
-               "unique_classes": int(len(set(y_train[keep_idx])))})
         try:
             model = return_model(model_family)
             model.fit(X_train[keep_idx], y_train[keep_idx])
             accs.append(model.score(X_test, y_test))
-        except Exception as ex:
-            _dbg("E", "debug", "point_removal_low:exception",
-                  f"Single-class or fit error: {ex}",
-                  {"frac": float(frac), "error": str(ex)})
+        except Exception:
             accs.append(np.nan)
     return np.array(accs)
 
