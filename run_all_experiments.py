@@ -46,41 +46,27 @@ def load_covtype(train_size=200, num_test=1000, random_state=42):
     idxs = np.random.permutation(len(data))
     data, target = data[idxs], target[idxs] - 1  # 0-6
 
-    # Binary: keep class 1 only
-    binary_mask = target == 1
-    X_bin, y_bin = data[binary_mask], target[binary_mask]
-    idxs2 = np.random.permutation(len(X_bin))
-    X_bin, y_bin = X_bin[idxs2], y_bin[idxs2]
+    # Binary: class 1 vs rest -> 1, 0
+    y_bin = (target == 1).astype(int)
+    idxs2 = np.random.permutation(len(data))
+    data, y_bin = data[idxs2], y_bin[idxs2]
 
-    # If not enough class-1 samples, fall back to all data
-    if len(X_bin) < train_size + num_test + 500:
-        X_bin, y_bin = data, target
-        idxs3 = np.random.permutation(len(X_bin))
-        X_bin, y_bin = X_bin[idxs3], y_bin[idxs3]
-
-    n = len(X_bin)
-    train_end = train_size
-    test_end = train_size + num_test
-    pool_end = min(n - test_end, train_size + 20000)
-
-    X_train = X_bin[:train_end]
-    y_train = y_bin[:train_end]
-    X_pool = X_bin[train_end:pool_end]
-    y_pool = y_bin[train_end:pool_end]
-    X_test_full = X_bin[-test_end:]
-    y_test_full = y_bin[-test_end:]
-
-    # Normalize using pool statistics
+    # Normalize before splitting
     scaler = StandardScaler()
-    scaler.fit(X_pool)
-    X_train = scaler.transform(X_train)
-    X_pool = scaler.transform(X_pool)
-    X_test_full = scaler.transform(X_test_full)
+    scaler.fit(data[train_size:])  # use non-train as reference
+    data = scaler.transform(data)
+
+    X_train = data[:train_size]
+    y_train = y_bin[:train_size]
+    X_pool = data[train_size:]
+    y_pool = y_bin[train_size:]
+    X_test_full = X_pool[-num_test:]  # reuse tail of pool as test
+    y_test_full = y_pool[-num_test:]
 
     X_test = X_test_full[:num_test]
     y_test = y_test_full[:num_test]
-    X_heldout = X_test_full[num_test:]
-    y_heldout = y_test_full[num_test:]
+    X_heldout = X_pool[:len(X_pool) - num_test]
+    y_heldout = y_pool[:len(y_pool) - num_test]
 
     print(f"  CoverType: {len(X_train)} train, {len(X_pool)} pool, {len(X_test)} test, "
           f"{len(X_heldout)} heldout, classes={sorted(set(y_train))}")
@@ -93,7 +79,12 @@ def load_adult(train_size=200, num_test=1000, random_state=42):
 
     np.random.seed(random_state)
     adult = fetch_openml('adult', version=2, as_frame=False)
-    X, y = adult.data, adult.target.astype(int)
+    X, y_raw = adult.data, adult.target
+    # Convert string target '>50K' / '<=50K' to binary int 1/0
+    if y_raw.dtype.kind in ('U', 'S', 'O') or not np.issubdtype(y_raw.dtype, np.number):
+        y = (y_raw == '>50K').astype(int)
+    else:
+        y = y_raw.astype(int)
 
     # Identify categorical columns
     is_cat = [str(dt).startswith('categorical') or str(dt).startswith('object')
@@ -156,11 +147,13 @@ def load_mnist(train_size=200, num_test=1000, random_state=42):
     idxs2 = np.random.permutation(len(X))
     X, y_bin = X[idxs2], y_bin[idxs2]
 
-    # PCA to 32 dimensions
+    # PCA to 32 dimensions, fit on pool (non-train) for consistency
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    scaler.fit(X[train_size:])
+    X_scaled = scaler.transform(X)
     pca = PCA(n_components=32, random_state=42)
-    X_pca = pca.fit_transform(X_scaled)
+    pca.fit(X_scaled[train_size:])
+    X_pca = pca.transform(X_scaled)
 
     n = len(X_pca)
     train_end = train_size
@@ -328,37 +321,84 @@ def point_removal_low(X_train, y_train, X_test, y_test, vals, fracs, model_famil
 
 
 # =============================================================================
-# Noisy Label Detection (Exp 5)
+# Noisy Label Detection (Exp 5) - Valuation on Noisy Data
 # =============================================================================
 
-def noisy_detection(X_train, y_train, X_test, y_test, vals, flip_frac=0.10, seed=42):
+def compute_noisy_vals(X_train, y_train_orig, flip_idx, X_test, y_test,
+                       X_tot, y_tot, methods, directory, model_family='logistic',
+                       seed=42, max_iters=50):
     """
-    Flip flip_frac of labels, compute valuations, sort ascending.
-    Check cumulative noise discovery curve.
+    Flip labels at flip_idx, run DistShap methods on noisy data, return valuations.
 
+    Args:
+        X_train, y_train_orig: Original training data
+        flip_idx: Indices of flipped labels
+        methods: list of method flags, e.g. ['dsvarm', 'dist', 'tmc', 'loo']
+        max_iters: iterations for each method
     Returns:
-        noise_found: cumulative fraction of noisy labels discovered
-        fractions: x-axis values (fraction of data checked)
+        vals_dict: {method_name: values array}
     """
-    np.random.seed(seed)
-    n = len(y_train)
-    n_flip = int(n * flip_frac)
-    flip_idx = np.random.permutation(n)[:n_flip]
-    y_noisy = y_train.copy()
-    y_noisy[flip_idx] = 1 - y_noisy[flip_idx]  # flip binary labels
+    y_train = y_train_orig.copy()
+    y_train[flip_idx] = 1 - y_train[flip_idx]
 
-    # Sort by ascending value (low-value = potentially noisy)
-    sorted_idx = np.argsort(vals)
+    flags = {m: True for m in methods}
+    dshap = DistShap(
+        X=X_train, y=y_train,
+        X_test=X_test, y_test=y_test,
+        num_test=len(X_test),
+        X_tot=X_tot, y_tot=y_tot,
+        sources=None,
+        model_family=model_family,
+        metric='accuracy',
+        seed=seed,
+        directory=directory,
+        overwrite=True,
+    )
 
-    noise_found = []
-    n_found = 0
-    for i in range(1, n + 1):
-        if sorted_idx[i - 1] in flip_idx:
-            n_found += 1
-        noise_found.append(n_found / n_flip if n_flip > 0 else 0)
+    dshap.run(
+        dsvarm_run=flags.get('dsvarm', False),
+        dist_run=flags.get('dist', False),
+        tmc_run=flags.get('tmc', False),
+        loo_run=flags.get('loo', False),
+        save_every=10,
+        err=0.05,
+        max_iters=max_iters,
+    )
+    dshap.load_results(verbose=False)
 
-    fractions = np.arange(1, n + 1) / n
-    return np.array(noise_found), fractions
+    vals = {}
+    if 'dsvarm' in methods:
+        vals['dsvarm'] = np.mean(dshap.results['mem_dsvarm'], 0)
+    if 'dist' in methods:
+        vals['dist'] = np.mean(dshap.results['mem_dist'], 0)
+    if 'tmc' in methods:
+        vals['tmc'] = np.mean(dshap.results['mem_tmc'], 0)
+    if 'loo' in methods:
+        vals['loo'] = dshap.vals_loo
+
+    return vals, dshap
+
+
+def noisy_detection_curves(noisy_vals_dict, flip_idx, n):
+    """
+    Compute cumulative noise discovery curves from noisy valuations.
+    flip_idx: ground truth noisy indices (fixed externally)
+    Returns: {method: curve}
+    """
+    n_flip = len(flip_idx)
+    curves = {}
+    for key, vals in noisy_vals_dict.items():
+        if vals is None:
+            continue
+        sorted_idx = np.argsort(vals)
+        noise_found = []
+        n_found = 0
+        for i in range(1, n + 1):
+            if sorted_idx[i - 1] in flip_idx:
+                n_found += 1
+            noise_found.append(n_found / n_flip if n_flip > 0 else 0)
+        curves[key] = np.array(noise_found)
+    return curves
 
 
 # =============================================================================
@@ -402,8 +442,7 @@ def run_all_methods(X_train, y_train, X_test, y_test, X_tot, y_tot,
     # Create DistShap instance
     dshap = DistShap(
         X=X_train, y=y_train,
-        X_test=np.vstack([X_test, X_tot[:len(X_tot) // 2]]),
-        y_test=np.concatenate([y_test, y_tot[:len(y_tot) // 2]]),
+        X_test=X_test, y_test=y_test,
         num_test=len(X_test),
         X_tot=X_tot, y_tot=y_tot,
         sources=None,
@@ -556,7 +595,7 @@ def exp3_remove_high(X_train, y_train, X_test, y_test, vals_dict, model_family='
     Removal experiment: start with full set, remove high-value points first.
     fracs: remove 5% to 50%.
     """
-    fracs = np.arange(0.05, 0.55, 0.05)
+    fracs = np.arange(0.0, 0.55, 0.05)
     perf_curves = {}
 
     for key in ['dsvarm', 'dist', 'tmc', 'loo']:
@@ -585,7 +624,7 @@ def exp3_remove_high(X_train, y_train, X_test, y_test, vals_dict, model_family='
 
 def exp4_remove_low(X_train, y_train, X_test, y_test, vals_dict, model_family='logistic'):
     """Removal experiment: start with full set, remove low-value points first."""
-    fracs = np.arange(0.05, 0.55, 0.05)
+    fracs = np.arange(0.0, 0.55, 0.05)
     perf_curves = {}
 
     for key in ['dsvarm', 'dist', 'tmc', 'loo']:
@@ -611,45 +650,62 @@ def exp4_remove_low(X_train, y_train, X_test, y_test, vals_dict, model_family='l
 # Experiment 5: Noisy Label Detection
 # =============================================================================
 
-def exp5_noisy_detection(X_train, y_train, X_test, y_test, vals_dict, flip_frac=0.10, seed=42):
+def exp5_noisy_detection(X_train, y_train, X_test, y_test, X_tot, y_tot,
+                          flip_frac=0.10, seed=42):
     """
-    Flip 10% of labels, compute valuations, sort ascending.
-    Plot cumulative noise discovery curve.
+    Flip flip_frac of labels, re-run valuations on noisy data, compute noise discovery curves.
     """
     np.random.seed(seed)
     n = len(y_train)
     n_flip = int(n * flip_frac)
     flip_idx = np.random.permutation(n)[:n_flip]
 
-    detection_curves = {}
+    print(f"  Flipping {n_flip} labels...")
+    dir_noisy = f"./temp/noisy_{seed}"
+    os.makedirs(dir_noisy, exist_ok=True)
 
-    for key in ['dsvarm', 'dist', 'tmc', 'loo']:
-        vals = vals_dict[key]
-        noise_found, fractions = noisy_detection(X_train, y_train, X_test, y_test,
-                                                  vals, flip_frac, seed=seed + 1)
-        detection_curves[key] = noise_found
+    # Run all methods on noisy data
+    noisy_vals, _ = compute_noisy_vals(
+        X_train, y_train, flip_idx, X_test, y_test,
+        X_tot, y_tot,
+        methods=['dsvarm', 'dist', 'tmc', 'loo'],
+        directory=dir_noisy,
+        seed=seed,
+        max_iters=50,
+    )
 
-    vals_bz = vals_dict.get('banzhaf')
-    if vals_bz is not None:
-        noise_bz, _ = noisy_detection(X_train, y_train, X_test, y_test,
-                                       vals_bz, flip_frac, seed=seed + 1)
-        detection_curves['banzhaf'] = noise_bz
+    # Data Banzhaf on noisy data
+    # Flip labels for Banzhaf as well
+    y_train_flipped = y_train.copy()
+    y_train_flipped[flip_idx] = 1 - y_train_flipped[flip_idx]
+    vals_bz = compute_banzhaf(X_train, y_train_flipped, X_test, y_test,
+                               n_jobs=1, max_updates=50, seed=seed)
+    noisy_vals['banzhaf'] = vals_bz
+
+    # Compute noise discovery curves
+    detection_curves = noisy_detection_curves(noisy_vals, set(flip_idx), n)
 
     # Random ordering
     noise_rnd = []
     for _ in range(5):
         order = np.random.permutation(n)
-        sorted_idx = order
         n_found = 0
         curve = []
         for i in range(1, n + 1):
-            if sorted_idx[i - 1] in flip_idx:
+            if order[i - 1] in flip_idx:
                 n_found += 1
             curve.append(n_found / n_flip if n_flip > 0 else 0)
         noise_rnd.append(curve)
     detection_curves['random'] = np.mean(noise_rnd, axis=0)
 
-    return detection_curves, fractions * 100
+    import shutil
+    try:
+        shutil.rmtree(dir_noisy)
+    except:
+        pass
+
+    fractions = np.arange(1, n + 1) / n * 100
+    return detection_curves, fractions
 
 
 # =============================================================================
@@ -670,6 +726,33 @@ def exp6_auc_vs_iterations(X_train, y_train, X_test, y_test, X_tot, y_tot,
     # performance_points for AUC computation (consistent across all T)
     frac_pts = np.arange(0, n_new // 2, max(1, n_new // 40)) / n_new * 100
 
+    # Run LOO once (doesn't depend on iteration count, always n+1 evaluations)
+    dir_loo = f"./temp/loo_{seed}"
+    os.makedirs(dir_loo, exist_ok=True)
+    dshap_loo = DistShap(
+        X=X_train, y=y_train,
+        X_test=X_test, y_test=y_test,
+        num_test=len(X_test),
+        X_tot=X_tot, y_tot=y_tot,
+        sources=None,
+        model_family=model_family,
+        metric='accuracy',
+        seed=seed,
+        directory=dir_loo,
+        overwrite=True,
+    )
+    dshap_loo.run(loo_run=True)
+    vals_loo_full = dshap_loo.vals_loo
+    vals_loo_new = vals_loo_full[100:]
+    # LOO AUC for exp6 at each T is the same (it doesn't depend on iteration count)
+    # We compute it once using vals_loo_new as the ranking
+    # and repeat for each T in the plot
+    import shutil as _shutil
+    try:
+        _shutil.rmtree(dir_loo)
+    except:
+        pass
+
     for T in T_values:
         print(f"    T={T}...")
         dir_T = f"./temp/iter_T{T}_{seed}"
@@ -677,8 +760,7 @@ def exp6_auc_vs_iterations(X_train, y_train, X_test, y_test, X_tot, y_tot,
 
         dshap = DistShap(
             X=X_train, y=y_train,
-            X_test=np.vstack([X_test, X_tot[:len(X_tot) // 2]]),
-            y_test=np.concatenate([y_test, y_tot[:len(y_tot) // 2]]),
+            X_test=X_test, y_test=y_test,
             num_test=len(X_test),
             X_tot=X_tot, y_tot=y_tot,
             sources=None,
@@ -724,6 +806,13 @@ def exp6_auc_vs_iterations(X_train, y_train, X_test, y_test, X_tot, y_tot,
             )
             rnd_aucs.append(performance_auc(curve, frac_pts / 100))
         aucs['random'] = np.mean(rnd_aucs)
+
+        # LOO: computed once, same for all T
+        curve_loo = portion_performance(
+            dshap, np.argsort(-vals_loo_new), np.arange(0, n_new // 2, max(1, n_new // 40)),
+            X_new, y_new, X_init, y_init, X_heldout, y_heldout
+        )
+        aucs['loo'] = performance_auc(curve_loo, frac_pts / 100)
 
         # Banzhaf at different iteration levels
         try:
@@ -949,7 +1038,8 @@ def main():
         # ---- Experiment 5: Noisy Label Detection ----
         print(f"\n  Running Exp 5: Noisy label detection...")
         det5, x5 = exp5_noisy_detection(
-            X_train, y_train, X_heldout, y_heldout, vals_dict, flip_frac=0.10, seed=seed
+            X_train, y_train, X_test, y_test, X_tot, y_tot,
+            flip_frac=0.10, seed=seed
         )
         plot_curves(
             x5, det5,
