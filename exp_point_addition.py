@@ -160,11 +160,16 @@ def compute_banzhaf(X_train, y_train, X_util, y_util, max_updates=100, seed=42):
         print("  WARNING: pyDVL not installed. Banzhaf skipped.")
         return None
 
+    # Split utility data for train/test (new pyDVL Dataset needs all four)
+    n_u = len(X_util)
+    split = max(1, int(n_u * 0.8))
+    X_util_train, X_util_test = X_util[:split], X_util[split:]
+    y_util_train, y_util_test = y_util[:split], y_util[split:]
+
     model = LogisticRegression(solver="liblinear", max_iter=500, random_state=666)
-    test_ds = Dataset(X_util, y_util)
-    scorer = SupervisedScorer("accuracy", test_data=test_ds, default=0.0, range=(0.0, 1.0))
+    scorer = SupervisedScorer("accuracy", test_data=None, default=0.0, range=(0.0, 1.0))
     utility = ModelUtility(model=model, scorer=scorer)
-    dataset = Dataset(X_train, y_train)
+    dataset = Dataset(X_util_train, y_util_train, X_util_test, y_util_test)
     valuation = BanzhafValuation(
         utility=utility,
         sampler=MSRSampler(seed=seed),
