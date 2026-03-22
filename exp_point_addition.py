@@ -88,10 +88,29 @@ def load_adult_example_style(train_size=200, test_size=1000, num_test=1000, seed
     else:
         y = y_raw.astype(int)
 
-    is_cat = [
-        str(dt).startswith("categorical") or str(dt).startswith("object")
-        for dt in adult.feature_types
-    ]
+    is_cat = []
+    if hasattr(adult, "feature_types") and adult.feature_types is not None:
+        is_cat = [
+            str(dt).startswith("categorical") or str(dt).startswith("object")
+            for dt in adult.feature_types
+        ]
+    elif hasattr(adult, "categories") and adult.categories is not None:
+        cat_names = set(adult.categories.keys())
+        is_cat = [adult.feature_names[i] in cat_names for i in range(len(adult.feature_names))]
+    else:
+        import pandas as pd
+        try:
+            df = pd.DataFrame(X)
+            is_cat = [str(df[i].dtype) == "object" or "categorical" in str(df[i].dtype) for i in df.columns]
+        except Exception:
+            KNOWN_CAT = {
+                "workclass", "education", "marital-status", "occupation",
+                "relationship", "race", "sex", "native-country",
+                "workclass", "education-num", "marital-status", "occupation",
+                "relationship", "race", "sex", "native-country",
+            }
+            fn = getattr(adult, "feature_names", None)
+            is_cat = [str(f).lower() in KNOWN_CAT for f in (fn or [])]
     cat_cols = [i for i, v in enumerate(is_cat) if v]
     if cat_cols:
         enc = OrdinalEncoder(encoded_missing_value=-1)
