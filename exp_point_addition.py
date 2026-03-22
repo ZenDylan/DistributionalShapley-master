@@ -310,6 +310,14 @@ def addition_curve_pack(
     rnd_stack = [perf(rng.permutation(n_new)) * 100.0 for _ in range(n_rnd)]
     curves["random"] = np.mean(rnd_stack, axis=0)
 
+    # ---- Spearman rank correlation diagnostic ----
+    from scipy.stats import spearmanr
+    base_vals = vals_by_method["dsvarm"][100:]
+    print(f"  [addition] Spearman(dsvarm vs others)  high_first={high_first}")
+    for key in ("dist", "tmc", "loo"):
+        rho, p = spearmanr(base_vals, vals_by_method[key][100:])
+        print(f"    dsvarm vs {key:6s}: rho={rho:.4f}  p={p:.4e}")
+
     min_len = min(len(x_add), *(len(curves[k]) for k in curves))
     x_add = x_add[:min_len]
     for k in curves:
@@ -351,6 +359,15 @@ def plot_method_lines(ax, x, curve_dict, suffix):
             linewidth=s["lw"],
             label=s["label"],
         )
+
+    # Tighten y-axis for addition sub-plots so curves fill the vertical space
+    if suffix is None:
+        all_vals = [curve_dict[k] for k in curve_dict if k in dict(pairs)]
+        if all_vals:
+            y_min = min(v.min() for v in all_vals if len(v) > 0)
+            y_max = max(v.max() for v in all_vals if len(v) > 0)
+            margin = (y_max - y_min) * 0.08
+            ax.set_ylim(y_min - margin, y_max + margin)
 
 
 def process_dataset(name, pack, base_temp, seed_offset=0):
