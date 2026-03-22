@@ -13,12 +13,11 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.datasets import fetch_covtype
-from sklearn.linear_model import LogisticRegression
 
 warnings.filterwarnings("ignore")
 
 from DistShap import DistShap
-from shap_utils import portion_performance, return_model
+from shap_utils import portion_performance
 
 # -----------------------------------------------------------------------------
 # Style
@@ -27,7 +26,6 @@ STYLE = {
     "dsvarm":  {"ls": "dashdot", "c": "purple", "lw": 5, "label": "D-SVARM (Ours)"},
     "dist":    {"ls": "solid",   "c": "blue",   "lw": 5, "label": "D-Shapley"},
     "tmc":     {"ls": "dashed",  "c": "green",   "lw": 5, "label": "TMC-Shapley"},
-    "banzhaf": {"ls": "solid",   "c": "orange",  "lw": 3, "label": "Data Banzhaf (MSR)"},
     "loo":     {"ls": "dashed",  "c": "gray",    "lw": 3, "label": "LOO"},
     "random":  {"ls": "dotted", "c": "red",     "lw": 3, "label": "Random"},
 }
@@ -71,35 +69,6 @@ def load_covertype_example_style(train_size=200, test_size=1000, num_test=1000, 
     return X_train, y_train, X_combined, y_combined, X_dist_n, y_dist
 
 
-def compute_banzhaf(X_train, y_train, X_util, y_util, max_updates=100, seed=42):
-    try:
-        from pydvl.valuation.samplers import MSRSampler
-        from pydvl.valuation.utility import ModelUtility
-        from pydvl.valuation.scorers import SupervisedScorer
-        from pydvl.valuation.methods import BanzhafValuation
-        from pydvl.valuation.stopping import MinUpdates
-        from pydvl.utils import Dataset
-        from joblib import parallel_config
-    except ImportError:
-        print("  WARNING: pyDVL not installed. Banzhaf skipped.")
-        return None
-
-    model = LogisticRegression(solver="liblinear", max_iter=500, random_state=666)
-    test_ds = Dataset(X_util, y_util)
-    scorer = SupervisedScorer("accuracy", test_data=test_ds, default=0.0, range=(0.0, 1.0))
-    utility = ModelUtility(model=model, scorer=scorer)
-    dataset = Dataset(X_train, y_train)
-    valuation = BanzhafValuation(
-        utility=utility,
-        sampler=MSRSampler(seed=seed),
-        stopping=MinUpdates(max_updates),
-        progress=False,
-    )
-    with parallel_config(n_jobs=1):
-        result = valuation.fit(dataset)
-    return result.values
-
-
 def run_valuations(X_train, y_train, X_combined, y_combined, X_tot, y_tot, directory, seed=42):
     os.makedirs(directory, exist_ok=True)
     m = len(X_train)
@@ -115,7 +84,7 @@ def run_valuations(X_train, y_train, X_combined, y_combined, X_tot, y_tot, direc
         metric="accuracy",
         seed=seed,
         directory=directory,
-        overwrite=True,
+        overwrite=False,
     )
     print(f"  DistShap running ...")
     t0 = time.time()
@@ -145,9 +114,6 @@ def run_valuations(X_train, y_train, X_combined, y_combined, X_tot, y_tot, direc
         "tmc": mean_mem("mem_tmc"),
         "loo": np.asarray(dshap.vals_loo),
     }
-    X_util = X_combined[-1000:]
-    y_util = y_combined[-1000:]
-    vals["banzhaf"] = compute_banzhaf(X_train, y_train, X_util, y_util, max_updates=100, seed=seed)
     return dshap, vals
 
 
@@ -177,10 +143,6 @@ def addition_curves(
         v = vals[key][100:]
         curves[key] = perf(sort(v)) * 100.0
 
-    bz = vals.get("banzhaf")
-    if bz is not None:
-        curves["banzhaf"] = perf(sort(bz[100:])) * 100.0
-
     rnd_stack = [perf(rng.permutation(n_new)) * 100.0 for _ in range(n_rnd)]
     curves["random"] = np.mean(rnd_stack, axis=0)
 
@@ -198,7 +160,6 @@ def plot_curves(ax, x, curves, show_legend=False):
         ("dsvarm",  "dsvarm"),
         ("dist",    "dist"),
         ("tmc",     "tmc"),
-        ("banzhaf", "banzhaf"),
         ("loo",     "loo"),
         ("random",  "random"),
     ]
