@@ -85,10 +85,10 @@ def compute_banzhaf(X_train, y_train, X_util, y_util, max_updates=100, seed=42):
         return None
 
     model = LogisticRegression(solver="liblinear", max_iter=500, random_state=666)
-    test_ds = Dataset(x=X_util, y=y_util)
+    test_ds = Dataset(X_util, y_util)
     scorer = SupervisedScorer("accuracy", test_data=test_ds, default=0.0, range=(0.0, 1.0))
     utility = ModelUtility(model=model, scorer=scorer)
-    dataset = Dataset(x=X_train, y=y_train)
+    dataset = Dataset(X_train, y_train)
     valuation = BanzhafValuation(
         utility=utility,
         sampler=MSRSampler(seed=seed),
